@@ -6,13 +6,16 @@ set(libproxy_SRCS
     server.hpp
     server.cpp
     log_level.hpp
-    logger.hpp
-    logger_factory.hpp
-    logger_factory.cpp
     error.hpp
     error.cpp
-    file_out_logger.hpp
-    file_out_logger.cpp
+    logger/logger.hpp
+    logger/logger_factory.hpp
+    logger/logger_factory.cpp
+    logger/file_out_logger.hpp
+    logger/file_out_logger.cpp
+
+    parser/postgres/packet.hpp
+
 )
 
 add_library(libproxy STATIC
