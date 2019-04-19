@@ -1,7 +1,7 @@
 #include "error.hpp"
 #include "log_level.hpp"
 
-namespace logging {
+namespace proxy {
 
 class error_private {
 public:
@@ -27,4 +27,4 @@ bool error::has_error() const { return p_->type_ != error_type::NO_ERROR; }
 
 std::string error::text() const { return p_->error_; }
 
-} // namespace logging
+} // namespace proxy

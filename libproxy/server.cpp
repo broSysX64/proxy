@@ -1,19 +1,8 @@
-//
-// server.cpp
-// ~~~~~~~~~~
-//
-// Copyright (c) 2003-2017 Christopher M. Kohlhoff (chris at kohlhoff dot com)
-//
-// Distributed under the Boost Software License, Version 1.0. (See accompanying
-// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
-//
-
 #include "server.hpp"
 #include <signal.h>
 #include <utility>
 
-namespace http {
-namespace server {
+namespace proxy {
 
 server::server(const std::string& address, const std::string& port,
     const std::string& doc_root)
@@ -21,8 +10,7 @@ server::server(const std::string& address, const std::string& port,
     signals_(io_service_),
     acceptor_(io_service_),
     connection_manager_(),
-    socket_(io_service_),
-    request_handler_(doc_root)
+    socket_(io_service_)
 {
   // Register to handle the signals that indicate when the server should exit.
   // It is safe to register for the same signal multiple times in a program,
@@ -90,5 +78,4 @@ void server::do_await_stop()
       });
 }
 
-} // namespace server
-} // namespace http
+} // namespace proxy

@@ -1,19 +1,18 @@
 #ifndef ERROR_HPP
 #define ERROR_HPP
 
-
 #include <memory>
 #include <string>
 
 #include "log_level.hpp"
 
-namespace logging {
+namespace proxy {
 
 class error_private;
 
 class error {
 public:
-    explicit error(error_type type = logging::error_type::NO_ERROR,
+    explicit error(error_type type = proxy::error_type::NO_ERROR,
                    const std::string &text = std::string());
     error(const error &other);
     ~error();
@@ -31,6 +30,7 @@ public:
 private:
     std::shared_ptr<error_private> p_;
 };
-} // namespace logging
+
+} // namespace proxy
 
 #endif // ERROR_HPP

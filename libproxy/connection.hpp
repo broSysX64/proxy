@@ -1,79 +1,68 @@
-//
-// connection.hpp
-// ~~~~~~~~~~~~~~
-//
-// Copyright (c) 2003-2017 Christopher M. Kohlhoff (chris at kohlhoff dot com)
-//
-// Distributed under the Boost Software License, Version 1.0. (See accompanying
-// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
-//
+#ifndef CONNECTION_HPP
+#define CONNECTION_HPP
 
-#ifndef HTTP_CONNECTION_HPP
-#define HTTP_CONNECTION_HPP
+#include <cstdlib>
+#include <cstddef>
+#include <iostream>
+#include <string>
 
-#include <array>
-#include <memory>
+#include <boost/shared_ptr.hpp>
+#include <boost/enable_shared_from_this.hpp>
+#include <boost/bind.hpp>
 #include <boost/asio.hpp>
-#include "reply.hpp"
-#include "request.hpp"
-#include "request_handler.hpp"
-#include "request_parser.hpp"
+#include <boost/thread/mutex.hpp>
+#include <boost/variant.hpp>
+#include <boost/optional.hpp>
 
-namespace http {
-namespace server {
+#include "parser/postgres/packet.hpp"
+
+namespace proxy {
 
 class connection_manager;
+class error;
 
-/// Represents a single connection from a client.
-class connection
-  : public std::enable_shared_from_this<connection>
+namespace ip = boost::asio::ip;
+
+
+class connection : public boost::enable_shared_from_this<connection>, private boost::noncopyable
 {
 public:
-  connection(const connection&) = delete;
-  connection& operator=(const connection&) = delete;
+    typedef std::function<proxy::error(const boost::system::error_code&, const size_t&)> handler_read_f;
+    typedef std::function<proxy::error(const std::string&, unsigned short)> handler_start_f;
+    typedef std::function<proxy::error(void)> handler_close_f;
+    typedef std::function<proxy::error(const proxy::parser::postgres::header_psql::header_psql_ptr)> handler_log_f;
+    typedef boost::shared_ptr<connection> connection_ptr;
+    typedef boost::variant<handler_read_f, handler_start_f, handler_close_f, handler_log_f> connection_handler_f;
+    typedef std::unordered_map<log_socket_handler,connection_handler_f> connection_handler_ptr;
+    typedef ip::tcp::socket socket_type;
 
-  /// Construct a connection with the given socket.
-  explicit connection(boost::asio::ip::tcp::socket socket,
-      connection_manager& manager, request_handler& handler);
+    enum { buffer_size = 1024 };
 
-  /// Start the first asynchronous operation for the connection.
-  void start();
+    explicit connection(boost::asio::io_service& ios);
+    virtual ~connection() = default;
 
-  /// Stop all asynchronous operations associated with the connection.
-  void stop();
+    socket_type& local_socket();
+    socket_type& server_socket();
 
+    connection_handler_ptr connection_handlers() const { return connection_handlers_; }
 private:
-  /// Perform an asynchronous read operation.
-  void do_read();
 
-  /// Perform an asynchronous write operation.
-  void do_write();
+    socket_type local_socket_;
+    socket_type server_socket_;
 
-  /// Socket for the connection.
-  boost::asio::ip::tcp::socket socket_;
+    std::array<char, buffer_size> local_buffer_;
+    std::array<char, buffer_size> server_buffer_;
 
-  /// The manager for this connection.
-  connection_manager& connection_manager_;
+    connection_handler_ptr connection_handlers_;
 
-  /// The handler used to process the incoming request.
-  request_handler& request_handler_;
+    std::shared_ptr<proxy::parser::postgres::parser_header> local_parser_;
 
-  /// Buffer for incoming data.
-  std::array<char, 8192> buffer_;
-
-  /// The incoming request.
-  request request_;
-
-  /// The parser for the incoming request.
-  request_parser request_parser_;
-
-  /// The reply to be sent back to the client.
-  reply reply_;
+    boost::mutex mtx_;
 };
+
 
 typedef std::shared_ptr<connection> connection_ptr;
 
-} // namespace server
-} // namespace http
+} // namespace proxy
 
-#endif // HTTP_CONNECTION_HPP
+#endif // CONNECTION_HPP

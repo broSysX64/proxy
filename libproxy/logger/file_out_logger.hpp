@@ -11,27 +11,23 @@
 
 using namespace std;
 
+namespace proxy {
 namespace logging {
-
-class error;
 
 class file_out_logger : public logger {
 public:
     explicit file_out_logger() = delete;
-    file_out_logger(const logging_config_t &config);
+    explicit file_out_logger(const logging_config_t &config);
 
-    virtual error log(const std::string &message);
-    virtual error log(const std::string &message, const log_level level);
-    virtual error log(const std::string &message, const log_level level, const log_db);
-    virtual error log(const std::string &message, const log_level level, const log_db db, const log_query query);
-
+    error log(const std::string &message) override;
+    error log(const std::string &message, const log_level level, const log_query query = log_query::NONE) override;
 
 protected:
-    void reopen();
+    void reopen_file();
     string file_name;
-    ofstream file;
-    chrono::seconds reopen_interval;
-    chrono::system_clock::time_point last_reopen;
+    ofstream file_stream;
+    chrono::seconds reopen_duration;
+    chrono::system_clock::time_point last_reopen_duration;
 
 private:
     explicit file_out_logger(const file_out_logger &) noexcept;
@@ -39,5 +35,6 @@ private:
 };
 
 } // logging
+} // proxy
 
 #endif // FILE_OUT_LOGGER_HPP

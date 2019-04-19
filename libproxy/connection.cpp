@@ -1,94 +1,173 @@
-//
-// connection.cpp
-// ~~~~~~~~~~~~~~
-//
-// Copyright (c) 2003-2017 Christopher M. Kohlhoff (chris at kohlhoff dot com)
-//
-// Distributed under the Boost Software License, Version 1.0. (See accompanying
-// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
-//
-
 #include "connection.hpp"
+#include "connection_manager.hpp"
+
 #include <utility>
 #include <vector>
-#include "connection_manager.hpp"
-#include "request_handler.hpp"
+#include <memory>
 
-namespace http {
-namespace server {
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/asio/buffer.hpp>
+#include <boost/iostreams/device/array.hpp>
+#include <boost/iostreams/stream.hpp>
+#include <boost/variant.hpp>
+#include "error.hpp"
 
-connection::connection(boost::asio::ip::tcp::socket socket,
-    connection_manager& manager, request_handler& handler)
-  : socket_(std::move(socket)),
-    connection_manager_(manager),
-    request_handler_(handler)
+#include "logger/logger.hpp"
+#include "logger/logger_factory.hpp"
+
+namespace proxy {
+
+connection::connection(boost::asio::io_service &ios)
+    : local_socket_(ios),
+      server_socket_  (ios),
+      local_parser_ (std::make_shared<proxy::parser::postgres::parser_header>())
 {
-}
+    handler_start_f start_session_ptr = [this](const std::string& upstream_host, unsigned short upstream_port)
+    {
+        auto self(shared_from_this());
 
-void connection::start()
-{
-  do_read();
-}
+        server_socket_.async_connect(
+            ip::tcp::endpoint(boost::asio::ip::address::from_string(upstream_host),upstream_port),
+            [this, self](const boost::system::error_code& error) -> proxy::error {
+                if (!error)
+                {
+                    auto self(shared_from_this());
 
-void connection::stop()
-{
-  socket_.close();
-}
+                    server_socket_.async_read_some(
+                        boost::asio::buffer(server_buffer_, buffer_size),
+                        [this, self](const boost::system::error_code& error, size_t bytes_transferred) -> proxy::error {
+                            return boost::get<handler_read_f>(connection_handlers_[log_socket_handler::server_read])(error, bytes_transferred);
+                        });
 
-void connection::do_read()
-{
-  auto self(shared_from_this());
-  socket_.async_read_some(boost::asio::buffer(buffer_),
-      [this, self](boost::system::error_code ec, std::size_t bytes_transferred)
-      {
-        if (!ec)
+                    local_socket_.async_read_some (
+                        boost::asio::buffer(local_buffer_, buffer_size),
+                        [this, self](const boost::system::error_code& error, size_t bytes_transferred) -> proxy::error {
+                            return boost::get<handler_read_f>(connection_handlers_[log_socket_handler::local_read])(error, bytes_transferred);
+                        });
+                }
+                else
+                    return boost::get<handler_close_f>(connection_handlers_[log_socket_handler::close_session])();
+
+                return proxy::error(error_type::NO_ERROR);
+            });
+
+        return error(error_type::NO_ERROR);
+    };
+
+    handler_close_f close_session_ptr = [this](void) {
+        boost::mutex::scoped_lock lock(mtx_);
+
+        if (local_socket_.is_open())
+            local_socket_.close();
+
+        if (server_socket_.is_open())
+            server_socket_.close();
+
+        return error(error_type::NO_ERROR);
+    };
+
+
+    handler_log_f handler_log = [this](const proxy::parser::postgres::header_psql::header_psql_ptr packet) {
+        if (packet->command() == log_protocol_psql::QUERY)
         {
-          request_parser::result_type result;
-          std::tie(result, std::ignore) = request_parser_.parse(
-              request_, buffer_.data(), buffer_.data() + bytes_transferred);
+            auto find_result = std::find_if(text_log_query.begin(), text_log_query.end() , [&packet](std::pair<log_query, std::string > element){
+                auto find = (packet->query().find(element.second) != std::string::npos);
+                return find;
+            });
 
-          if (result == request_parser::good)
-          {
-            request_handler_.handle_request(request_, reply_);
-            do_write();
-          }
-          else if (result == request_parser::bad)
-          {
-            reply_ = reply::stock_reply(reply::bad_request);
-            do_write();
-          }
-          else
-          {
-            do_read();
-          }
+            if (packet->query().empty())
+                return proxy::error();
+
+            if (find_result != std::end(text_log_query))
+                logging::INFO(packet->query(), find_result->first);
+            else
+                logging::INFO(packet->query());
         }
-        else if (ec != boost::asio::error::operation_aborted)
+        return proxy::error();
+    };
+
+
+    handler_read_f server_read_ptr = [this](const boost::system::error_code& error, const size_t& bytes_transferred) {
+        if (!error)
         {
-          connection_manager_.stop(shared_from_this());
+            auto self(shared_from_this());
+
+            async_write(local_socket_,
+                        boost::asio::buffer(server_buffer_,bytes_transferred),
+                        [this, self](const boost::system::error_code& error, size_t /*bytes_transferred*/) -> proxy::error
+                        {
+                            if (!error)
+                            {
+                                auto self(shared_from_this());
+
+                                server_socket_.async_read_some(
+                                    boost::asio::buffer(server_buffer_, buffer_size),
+                                    [this, self](const boost::system::error_code& error, size_t bytes_transferred) -> proxy::error {
+                                        return boost::get<handler_read_f>(connection_handlers_[log_socket_handler::server_read])(error, bytes_transferred);
+                                    });
+                            }
+                            else
+                                return boost::get<handler_close_f>(connection_handlers_[log_socket_handler::close_session])();
+
+                            return proxy::error(error_type::NO_ERROR);
+                        });
         }
-      });
+        else
+            return boost::get<handler_close_f>(connection_handlers_[log_socket_handler::close_session])();
+
+        return proxy::error(error_type::NO_ERROR);
+    };
+
+    handler_read_f local_read_ptr = [this](const boost::system::error_code& error, const size_t& bytes_transferred)
+    {
+        if (!error)
+        {
+            auto packet = local_parser_->parse_buffer(local_buffer_.data(), bytes_transferred);
+            boost::get<handler_log_f>(connection_handlers_[log_socket_handler::parse_log])(packet);
+
+            auto self(shared_from_this());
+            async_write(server_socket_,
+                        boost::asio::buffer(local_buffer_, bytes_transferred),
+                        [this, self](const boost::system::error_code& error, size_t /*bytes_transferred*/) -> proxy::error {
+                            if (!error)
+                            {
+                                auto self(shared_from_this());
+
+                                local_socket_.async_read_some(
+                                    boost::asio::buffer(local_buffer_, buffer_size),
+                                    [this, self](const boost::system::error_code& error, size_t bytes_transferred) -> proxy::error {
+                                        return boost::get<handler_read_f>(connection_handlers_[log_socket_handler::local_read])(error, bytes_transferred);
+                                    });
+                            }
+                            else
+                                return boost::get<handler_close_f>(connection_handlers_[log_socket_handler::close_session])();
+
+                            return proxy::error(error_type::NO_ERROR);
+                        });
+        }
+        else
+            return boost::get<handler_close_f>(connection_handlers_[log_socket_handler::close_session])();
+
+        return proxy::error(error_type::NO_ERROR);
+    };
+
+
+    connection_handlers_.insert(std::make_pair(log_socket_handler::server_read,server_read_ptr));
+    connection_handlers_.insert(std::make_pair(log_socket_handler::local_read,local_read_ptr));
+    connection_handlers_.insert(std::make_pair(log_socket_handler::start_session,start_session_ptr));
+    connection_handlers_.insert(std::make_pair(log_socket_handler::close_session,close_session_ptr));
+    connection_handlers_.insert(std::make_pair(log_socket_handler::parse_log,handler_log));
 }
 
-void connection::do_write()
+connection::socket_type &connection::local_socket()
 {
-  auto self(shared_from_this());
-  boost::asio::async_write(socket_, reply_.to_buffers(),
-      [this, self](boost::system::error_code ec, std::size_t)
-      {
-        if (!ec)
-        {
-          // Initiate graceful connection closure.
-          boost::system::error_code ignored_ec;
-          socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both,
-            ignored_ec);
-        }
-
-        if (ec != boost::asio::error::operation_aborted)
-        {
-          connection_manager_.stop(shared_from_this());
-        }
-      });
+    return local_socket_;
 }
 
-} // namespace server
-} // namespace http
+connection::socket_type &connection::server_socket()
+{
+    return server_socket_;
+}
+
+} // namespace proxy
